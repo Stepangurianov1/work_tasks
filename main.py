@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import time
 import calendar
 import re
+import numpy as np
 from sqlalchemy import create_engine
 
 
@@ -87,7 +88,7 @@ def run_query_dwh(query, connection):
     return df
 
 
-def query_get_data_payout(day_start, day_end):
+def query_get_data_payout(day_start, day_end, clients_ids: tuple):
     query = f"""
             SELECT
             i.id,
@@ -110,7 +111,7 @@ def query_get_data_payout(day_start, day_end):
             JOIN lists.currency_list lcl on lcl.id = i.currency_id
             JOIN engines.engine e on e.id = i.engine_id
             join orders.withdraw ow on ow.id = i.order_id
-        WHERE i.created_at >= '{day_start}' and i.created_at <= '{day_end}'
+        WHERE i.created_at >= '{day_start}' and i.created_at <= '{day_end}' and i.client_id in {clients_ids}
     """
     return query
 
@@ -159,7 +160,7 @@ def get_invoice_data_by_days(start_date: str, end_date: str, type_order: str):
             if type_order == 'invoice':
                 query_get_data = query_get_data_inplace(day_start, day_end)
             else:
-                query_get_data = query_get_data_payout(day_start, day_end)
+                query_get_data = query_get_data_payout(day_start, day_end, clients_ids=tuple([3960, 3949]))
             try:
                 daily_data = run_query_with_conn(conn, query_get_data)
                 if not daily_data.empty:
@@ -177,7 +178,8 @@ def get_invoice_data_by_days(start_date: str, end_date: str, type_order: str):
             time.sleep(0.5)
     finally:
         conn.close()  # Закрываем соединение в конце
-
+    final_df.to_csv('test.csv', index=False)
+    final_df = final_df.rename(columns={'display_name': 'engine'})
     return final_df
 
 
@@ -211,16 +213,24 @@ def upload_data_invoice(date_start: str, date_end: str, granularity: str, order_
     data['device_short'] = data['device'].apply(lambda x: parce_device(x))
 
     data['created_at'] = pd.to_datetime(data['created_at'])
-
-    data['orders_count'] = data.groupby('payer_id')['payer_id'].transform('count')
-    data['cluster'] = data['orders_count'].apply(assign_cluster)
+    # TODO: Тут заглушка, пока в withdraw нет payer_id
+    if order_type == 'invoice':
+        data['orders_count'] = data.groupby('payer_id')['payer_id'].transform('count')
+        data['cluster'] = data['orders_count'].apply(assign_cluster)
+    else:
+        data['cluster'] = '-'
+        data['payer_id'] = np.nan
 
     data['created_at'] = pd.to_datetime(data['created_at'], utc=True, errors='coerce')
     data['finished_at'] = pd.to_datetime(data['finished_at'], utc=True, errors='coerce')
 
     data['close_diff'] = data['finished_at'] - data['created_at']
-    data['success_amount'] = data['amount'].where(data['status_id'] == 2, 0)
-    data['reject_amount'] = data['amount'].where(data['status_id'] != 2, 0)
+    if order_type == 'invoice':
+        success_status_id = 2
+    else:
+        success_status_id = 4
+    data['success_amount'] = data['amount'].where(data['status_id'] == success_status_id, 0)
+    data['reject_amount'] = data['amount'].where(data['status_id'] != success_status_id, 0)
     result = pd.DataFrame()
     # for granularity in ['M', 'W', 'D']:
     data_granularity = data.copy()
@@ -229,15 +239,16 @@ def upload_data_invoice(date_start: str, date_end: str, granularity: str, order_
         data_granularity[col] = data_granularity[col].dt.tz_localize(None)
     if granularity == 'M':
         data_granularity['date'] = data_granularity['created_at'].dt.to_period('M').dt.to_timestamp().dt.date
+    elif granularity == 'W':
+        data_granularity['date'] = data_granularity['created_at'].dt.to_period('W').apply(lambda x: x.start_time)
     else:
         data_granularity['date'] = data_granularity['created_at'].dt.to_period(granularity)
-
     data_granularity = (
         data_granularity
-        .groupby(['date', 'currency', 'payment_system', 'bank_name', 'bank_country', 'cluster'])
+        .groupby(['date', 'currency', 'payment_system', 'bank_name', 'bank_country', 'cluster', 'engine', 'client_name'])
         .agg(
             orders_count=('order_id', 'count'),
-            success_orders_count=('status_id', lambda x: (x == 2).sum()),
+            success_orders_count=('status_id', lambda x: (x == success_status_id).sum()),
             user_count=('payer_id', 'nunique'),
             amount_sum=('amount', 'sum'),
             success_amount_sum=('success_amount', 'sum'),
@@ -298,10 +309,9 @@ def main(mode, granularity, order_type):
 
         data_invoice = data_invoice.merge(data_from_dwh,
                                           on=['date', 'currency', 'payment_system', 'bank_name', 'bank_country',
-                                              'cluster', 'granularity'],
+                                              'cluster', 'granularity', 'engine', 'client_name'],
                                           how='left', suffixes=('_new', '_old'))
         data_invoice.to_csv('test_inv.csv', index=False)
-        # print(data_invoice.shape, 'q')
         data_invoice = data_invoice[(data_invoice['amount_sum_new'] != data_invoice['amount_sum_old']) |
                                     (data_invoice['success_orders_count_new'] != data_invoice[
                                         'success_orders_count_old']) |
@@ -329,7 +339,15 @@ def main(mode, granularity, order_type):
                     avg_close_time = INTERVAL %s  -- передаем интервал
                 WHERE date = %s AND 
                       currency = %s AND
-                      payment_system = %s
+                      payment_system = %s AND
+                      bank_name = %s AND
+                      bank_country = %s AND
+                      cluster = %s AND
+                      granularity = %s AND 
+                      order_type = %s AND
+                      engine = %s AND
+                      client_name = %s 
+                      
                 """
                 avg_close_time_interval = f"{row['avg_close_time']} seconds"  # Форматируем как интервал в секундах
 
@@ -339,10 +357,17 @@ def main(mode, granularity, order_type):
                     row['user_count'],
                     row['success_amount_sum'],
                     row['reject_amount_sum'],
-                    avg_close_time_interval,  # Передаем как интервал
+                    avg_close_time_interval,
                     row['date'],
                     row['currency'],
-                    row['payment_system']
+                    row['payment_system'],
+                    row['bank_name'],
+                    row['bank_country'],
+                    row['cluster'],
+                    row['granularity'],
+                    order_type,
+                    row['engine'],
+                    row['client_name']
                 ))
             conn.commit()
             conn.close()
@@ -369,6 +394,7 @@ def main(mode, granularity, order_type):
         date_end = date_end.strftime('%Y-%m-%d')
         print(date_start, date_end)
         data_invoice = upload_data_invoice(date_start, date_end, granularity, order_type)
+        data_invoice['order_type'] = order_type
     if not data_invoice.empty:
         data_invoice.to_sql(
             schema='cascade',
@@ -381,4 +407,4 @@ def main(mode, granularity, order_type):
 
 
 if __name__ == '__main__':
-    result = main(mode='update', granularity='M', order_type='invoice')
+    result = main(mode='upload', granularity='W', order_type='payout')
