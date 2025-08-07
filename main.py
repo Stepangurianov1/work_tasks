@@ -215,7 +215,16 @@ def agg_data(date_start: str, date_end: str, granularity: str, order_type: str) 
     data['created_at'] = pd.to_datetime(data['created_at'])
     # TODO: Тут заглушка, пока в withdraw нет payer_id
     if order_type == 'invoice':
-        data['orders_count'] = data.groupby('payer_id')['payer_id'].transform('count')
+        conn = create_connection()
+        query_get_orders_count = f"""
+                    select COUNT(id) as orders_count, payer_id from orders.invoice i 
+                    where created_at > '01-04-2025' and payer_id in {tuple(data['payer_id'].unique())}
+                    group by payer_id
+                """
+        df_get_orders_count = run_query_with_conn(conn, query_get_orders_count)
+        conn.close()
+        data = data.merge(df_get_orders_count, on='payer_id', how='left')
+        print(data['orders_count'].isna().sum())
         data['cluster'] = data['orders_count'].apply(assign_cluster)
     else:
         data['cluster'] = '-'
@@ -231,15 +240,14 @@ def agg_data(date_start: str, date_end: str, granularity: str, order_type: str) 
         success_status_id = 4
     data['success_amount'] = data['amount'].where(data['status_id'] == success_status_id, 0)
     data['reject_amount'] = data['amount'].where(data['status_id'] != success_status_id, 0)
-    result = pd.DataFrame()
-    # for granularity in ['M', 'W', 'D']:
     data_granularity = data.copy()
 
     for col in data_granularity.select_dtypes(include=['datetimetz']).columns:
         data_granularity[col] = data_granularity[col].dt.tz_localize(None)
     if granularity == 'M':
-        data_granularity['date_start'] = data_granularity['created_at'].dt.to_period('M').dt.to_timestamp().dt.date
-        data_granularity['date_end'] = (data_granularity['date_start'] + MonthEnd(0)).date()
+        data_granularity['date_start'] = data_granularity['created_at'].dt.to_period('M').dt.to_timestamp()
+        data_granularity['date_end'] = (data_granularity['date_start'] + MonthEnd(0)).dt.date
+        data_granularity['date_start'] = data_granularity['date_start'].dt.date
     elif granularity == 'W':
         data_granularity['date_start'] = data_granularity['created_at'].dt.to_period('W').apply(lambda x: x.start_time)
         data_granularity['date_end'] = (data_granularity['date_start'] + pd.Timedelta(days=6)).dt.date
@@ -266,10 +274,17 @@ def agg_data(date_start: str, date_end: str, granularity: str, order_type: str) 
     data_granularity['avg_close_time'] = (data_granularity['avg_close_time']
                                           .astype('timedelta64[s]')
                                           .apply(lambda x: str(pd.to_timedelta(x, unit='s'))))
-    result = pd.concat([result, data_granularity])
-    result['date_start'] = result['date_start'].astype(str)
-    result['date_end'] = result['date_end'].astype(str)
-    return result
+    data_granularity['date_start'] = data_granularity['date_start'].astype(str)
+    data_granularity['date_end'] = data_granularity['date_end'].astype(str)
+    return data_granularity
+
+
+def align_to_monday(date_str):
+    """
+    Приводит дату к предыдущему понедельнику (если уже понедельник — не меняет).
+    """
+    date = pd.to_datetime(date_str)
+    return (date - pd.Timedelta(days=date.weekday())).date()
 
 
 def execute_functions_mode(mode, granularity, order_type):
@@ -283,12 +298,19 @@ def execute_functions_mode(mode, granularity, order_type):
     if mode == 'update':
         conn = create_conn_dwh()
         date_end = \
-            run_query_dwh("""SELECT max(date_end) as max_date FROM cascade.e_come_payments_summary""", conn)[
-                'max_date'].iloc[0]
+            run_query_dwh(f"""SELECT max(date_end) as max_date FROM cascade.e_come_payments_summary
+                                     WHERE granularity = '{granularity}'""", conn)['max_date'].iloc[0]
+
         date_start = (date_end - relativedelta(months=1)).strftime('%Y-%m-%d')
         if granularity == 'M':
-            date_start = date_end
+            date_start = date_end.replace(day=1)
             date_end = (date_end + relativedelta(day=31))
+            date_start = date_start.strftime('%Y-%m-%d')
+
+        if granularity == 'W':
+            date_end_dt = pd.to_datetime(date_end)
+            date_start = date_end_dt - pd.Timedelta(days=30)
+            date_start = align_to_monday(date_start)
             date_start = date_start.strftime('%Y-%m-%d')
 
         date_end = date_end.strftime('%Y-%m-%d')
@@ -347,18 +369,18 @@ def execute_functions_mode(mode, granularity, order_type):
                     success_amount_sum = %s,
                     reject_amount_sum = %s,
                     avg_close_time = INTERVAL %s  -- передаем интервал
-                WHERE date_start = %s AND 
+                WHERE date_start = %s AND
                       date_end = %s AND
                       currency = %s AND
                       payment_system = %s AND
                       bank_name = %s AND
                       bank_country = %s AND
                       cluster = %s AND
-                      granularity = %s AND 
+                      granularity = %s AND
                       order_type = %s AND
                       engine = %s AND
-                      client_name = %s 
-                      
+                      client_name = %s
+
                 """
                 avg_close_time_interval = f"{row['avg_close_time']} seconds"  # Форматируем как интервал в секундах
 
@@ -388,8 +410,8 @@ def execute_functions_mode(mode, granularity, order_type):
     else:
         now = datetime.now()
         if granularity == 'D':
-            date_start = (now - timedelta(days=1)).date()
-            date_end = (now - timedelta(days=1)).date()
+            date_start = now.date()
+            date_end = now.date()
         # Для недели
         elif granularity == 'W':
             start_of_week = now - timedelta(days=now.weekday() + 7)
@@ -422,15 +444,15 @@ def main(granularity):
     # execute_functions_mode(mode='upload', granularity=granularity, order_type='payout')
     # print(f'Отработал: mode - upload, granularity - {granularity}, order_type - payout')
 
-    # execute_functions_mode(mode='update', granularity=granularity, order_type='payout')
-    # print(f'Отработал: mode - update, granularity - {granularity}, order_type - payout')
-    #
+    execute_functions_mode(mode='update', granularity=granularity, order_type='payout')
+    print(f'Отработал: mode - update, granularity - {granularity}, order_type - payout')
+
     # execute_functions_mode(mode='upload', granularity=granularity, order_type='invoice')
     # print(f'Отработал: mode - upload, granularity - {granularity}, order_type - invoice')
-    #
+
     execute_functions_mode(mode='update', granularity=granularity, order_type='invoice')
     print(f'Отработал: mode - update, granularity - {granularity}, order_type - invoice')
 
 
 if __name__ == '__main__':
-    main(granularity='W')
+    main(granularity='D')
