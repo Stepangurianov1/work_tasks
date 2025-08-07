@@ -8,6 +8,7 @@ import calendar
 import re
 import numpy as np
 from sqlalchemy import create_engine
+from pandas.tseries.offsets import MonthEnd
 
 
 def with_retry_on_connection_error(fn: Callable[..., Any], retries: int = 5, delay: float = 3.0) -> Callable:
@@ -149,8 +150,7 @@ def get_invoice_data_by_days(start_date: str, end_date: str, type_order: str):
     final_df = pd.DataFrame()
     current_date = start
     day_counter = 1
-
-    conn = create_connection()  # Открываем соединение один раз
+    conn = create_connection()
 
     try:
         while current_date <= end:
@@ -208,7 +208,7 @@ def assign_cluster(count):
             return '10+'
 
 
-def upload_data_invoice(date_start: str, date_end: str, granularity: str, order_type: str) -> pd.DataFrame:
+def agg_data(date_start: str, date_end: str, granularity: str, order_type: str) -> pd.DataFrame:
     data = get_invoice_data_by_days(date_start, date_end, order_type)
     data['device_short'] = data['device'].apply(lambda x: parce_device(x))
 
@@ -238,14 +238,19 @@ def upload_data_invoice(date_start: str, date_end: str, granularity: str, order_
     for col in data_granularity.select_dtypes(include=['datetimetz']).columns:
         data_granularity[col] = data_granularity[col].dt.tz_localize(None)
     if granularity == 'M':
-        data_granularity['date'] = data_granularity['created_at'].dt.to_period('M').dt.to_timestamp().dt.date
+        data_granularity['date_start'] = data_granularity['created_at'].dt.to_period('M').dt.to_timestamp().dt.date
+        data_granularity['date_end'] = (data_granularity['date_start'] + MonthEnd(0)).date()
     elif granularity == 'W':
-        data_granularity['date'] = data_granularity['created_at'].dt.to_period('W').apply(lambda x: x.start_time)
+        data_granularity['date_start'] = data_granularity['created_at'].dt.to_period('W').apply(lambda x: x.start_time)
+        data_granularity['date_end'] = (data_granularity['date_start'] + pd.Timedelta(days=6)).dt.date
     else:
-        data_granularity['date'] = data_granularity['created_at'].dt.to_period(granularity)
+        data_granularity['date_start'] = data_granularity['created_at'].dt.to_period(granularity)
+        data_granularity['date_end'] = data_granularity['created_at'].dt.to_period(granularity)
     data_granularity = (
         data_granularity
-        .groupby(['date', 'currency', 'payment_system', 'bank_name', 'bank_country', 'cluster', 'engine', 'client_name'])
+        .groupby(
+            ['date_start', 'date_end', 'currency', 'payment_system', 'bank_name',
+             'bank_country', 'cluster', 'engine', 'client_name'])
         .agg(
             orders_count=('order_id', 'count'),
             success_orders_count=('status_id', lambda x: (x == success_status_id).sum()),
@@ -262,11 +267,12 @@ def upload_data_invoice(date_start: str, date_end: str, granularity: str, order_
                                           .astype('timedelta64[s]')
                                           .apply(lambda x: str(pd.to_timedelta(x, unit='s'))))
     result = pd.concat([result, data_granularity])
-    result['date'] = result['date'].astype(str)
+    result['date_start'] = result['date_start'].astype(str)
+    result['date_end'] = result['date_end'].astype(str)
     return result
 
 
-def main(mode, granularity, order_type):
+def execute_functions_mode(mode, granularity, order_type):
     engine = create_engine('postgresql://{user}:{password}@{host}:{port}/postgres'.format(
         user='ste',
         password='ILzAYQ72aEe9',
@@ -277,19 +283,19 @@ def main(mode, granularity, order_type):
     if mode == 'update':
         conn = create_conn_dwh()
         date_end = \
-            run_query_dwh("""SELECT max(date) as max_date FROM cascade.e_come_payments_summary""", conn)[
+            run_query_dwh("""SELECT max(date_end) as max_date FROM cascade.e_come_payments_summary""", conn)[
                 'max_date'].iloc[0]
         date_start = (date_end - relativedelta(months=1)).strftime('%Y-%m-%d')
         if granularity == 'M':
             date_start = date_end
             date_end = (date_end + relativedelta(day=31))
+            date_start = date_start.strftime('%Y-%m-%d')
 
         date_end = date_end.strftime('%Y-%m-%d')
-        date_start = date_start.strftime('%Y-%m-%d')
         print(date_end, date_start)
-        data_invoice = upload_data_invoice(date_start, date_end, granularity, order_type)
+        data_invoice = agg_data(date_start, date_end, granularity, order_type)
         query_get_from_dwh = f"""SELECT * FROM cascade.e_come_payments_summary
-                                 WHERE "date" >= '{date_start}' AND "date" <= '{date_end}'
+                                 WHERE "date_start" >= '{date_start}' AND "date_end" <= '{date_end}'
                                  AND granularity = '{granularity}'
                              """
         print(query_get_from_dwh)
@@ -304,13 +310,16 @@ def main(mode, granularity, order_type):
         data_from_dwh['avg_close_time'] = pd.to_timedelta(data_from_dwh['avg_close_time'],
                                                           errors='coerce').dt.total_seconds()
 
-        data_invoice['date'] = pd.to_datetime(data_invoice['date'], errors='coerce')
-        data_from_dwh['date'] = pd.to_datetime(data_from_dwh['date'], errors='coerce')
+        data_invoice['date_start'] = pd.to_datetime(data_invoice['date_start'], errors='coerce')
+        data_invoice['date_end'] = pd.to_datetime(data_invoice['date_end'], errors='coerce')
+
+        data_from_dwh['date_start'] = pd.to_datetime(data_from_dwh['date_start'], errors='coerce')
+        data_from_dwh['date_end'] = pd.to_datetime(data_from_dwh['date_end'], errors='coerce')
 
         data_invoice = data_invoice.merge(data_from_dwh,
-                                          on=['date', 'currency', 'payment_system', 'bank_name', 'bank_country',
-                                              'cluster', 'granularity', 'engine', 'client_name'],
-                                          how='left', suffixes=('_new', '_old'))
+                                          on=['date_start', 'date_end', 'currency', 'payment_system', 'bank_name',
+                                              'bank_country', 'cluster', 'granularity', 'engine', 'client_name'],
+                                          how='inner', suffixes=('_new', '_old'))
         data_invoice.to_csv('test_inv.csv', index=False)
         data_invoice = data_invoice[(data_invoice['amount_sum_new'] != data_invoice['amount_sum_old']) |
                                     (data_invoice['success_orders_count_new'] != data_invoice[
@@ -327,6 +336,7 @@ def main(mode, granularity, order_type):
 
         conn.close()
         conn = create_conn_dwh()
+        print(data_invoice)
         with conn.cursor() as cursor:
             for index, row in data_invoice.iterrows():
                 update_query = """
@@ -337,7 +347,8 @@ def main(mode, granularity, order_type):
                     success_amount_sum = %s,
                     reject_amount_sum = %s,
                     avg_close_time = INTERVAL %s  -- передаем интервал
-                WHERE date = %s AND 
+                WHERE date_start = %s AND 
+                      date_end = %s AND
                       currency = %s AND
                       payment_system = %s AND
                       bank_name = %s AND
@@ -358,7 +369,8 @@ def main(mode, granularity, order_type):
                     row['success_amount_sum'],
                     row['reject_amount_sum'],
                     avg_close_time_interval,
-                    row['date'],
+                    row['date_start'],
+                    row['date_end'],
                     row['currency'],
                     row['payment_system'],
                     row['bank_name'],
@@ -393,7 +405,7 @@ def main(mode, granularity, order_type):
         date_start = date_start.strftime('%Y-%m-%d')
         date_end = date_end.strftime('%Y-%m-%d')
         print(date_start, date_end)
-        data_invoice = upload_data_invoice(date_start, date_end, granularity, order_type)
+        data_invoice = agg_data(date_start, date_end, granularity, order_type)
         data_invoice['order_type'] = order_type
     if not data_invoice.empty:
         data_invoice.to_sql(
@@ -406,5 +418,19 @@ def main(mode, granularity, order_type):
     return data_invoice
 
 
+def main(granularity):
+    # execute_functions_mode(mode='upload', granularity=granularity, order_type='payout')
+    # print(f'Отработал: mode - upload, granularity - {granularity}, order_type - payout')
+
+    # execute_functions_mode(mode='update', granularity=granularity, order_type='payout')
+    # print(f'Отработал: mode - update, granularity - {granularity}, order_type - payout')
+    #
+    # execute_functions_mode(mode='upload', granularity=granularity, order_type='invoice')
+    # print(f'Отработал: mode - upload, granularity - {granularity}, order_type - invoice')
+    #
+    execute_functions_mode(mode='update', granularity=granularity, order_type='invoice')
+    print(f'Отработал: mode - update, granularity - {granularity}, order_type - invoice')
+
+
 if __name__ == '__main__':
-    result = main(mode='upload', granularity='W', order_type='payout')
+    main(granularity='W')
