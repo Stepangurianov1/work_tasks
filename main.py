@@ -56,8 +56,7 @@ def query_get_data_inplace(day_start, day_end):
                 e.display_name,
                 extra -> 'binInfo' -> 'bankName' as bank_name,
                 extra -> 'binInfo' -> 'paymentSystem' as payment_system,
-                extra -> 'binInfo' -> 'country' as bank_country,
-                extra -> 'payerInfo' ->'userAgent' as device
+                extra -> 'binInfo' -> 'country' as bank_country
             FROM orders.invoice i
                 JOIN lists.invoice_order_type_list iotl ON i.order_type_id = iotl.id
                 JOIN clients.client lc on lc.id = i.client_id
@@ -106,8 +105,7 @@ def query_get_data_payout(day_start, day_end, clients_ids: tuple):
             e.display_name,
             i.extra -> 'binInfo' -> 'bankName' as bank_name,
             i.extra -> 'binInfo' -> 'paymentSystem' as payment_system,
-            i.extra -> 'binInfo' -> 'country' as bank_country,
-            i.extra -> 'payerInfo' ->'userAgent' as device
+            i.extra -> 'binInfo' -> 'country' as bank_country
         FROM orders.withdraw_engine i
             JOIN clients.client lc on lc.id = i.client_id
             JOIN lists.currency_list lcl on lcl.id = i.currency_id
@@ -184,15 +182,15 @@ def get_invoice_data_by_days(start_date: str, end_date: str, type_order: str):
     return final_df
 
 
-def parce_device(user_agent):
-    if not isinstance(user_agent, str):
-        return 'Unknown'
-    match = re.search(r'\(([^;]+)', user_agent)
-    if match:
-        first_part = match.group(1).strip()
-        first_word = first_part.split()[0]
-        return first_word
-    return 'Unknown'
+# def parce_device(user_agent):
+#     if not isinstance(user_agent, str):
+#         return 'Unknown'
+#     match = re.search(r'\(([^;]+)', user_agent)
+#     if match:
+#         first_part = match.group(1).strip()
+#         first_word = first_part.split()[0]
+#         return first_word
+#     return 'Unknown'
 
 
 def assign_cluster(count):
@@ -211,8 +209,6 @@ def assign_cluster(count):
 
 def agg_data(date_start: str, date_end: str, granularity: str, order_type: str) -> pd.DataFrame:
     data = get_invoice_data_by_days(date_start, date_end, order_type)
-    data['device'] = data['device'].apply(lambda x: parce_device(x))
-
     data['created_at'] = pd.to_datetime(data['created_at'])
     # TODO: Тут заглушка, пока в withdraw нет payer_id
     if order_type == 'invoice':
@@ -260,7 +256,7 @@ def agg_data(date_start: str, date_end: str, granularity: str, order_type: str) 
         data_granularity
         .groupby(
             ['date_start', 'date_end', 'currency', 'payment_system', 'bank_name',
-             'bank_country', 'cluster', 'engine', 'client_name', 'device'])
+             'bank_country', 'cluster', 'engine', 'client_name'])
         .agg(
             orders_count=('order_id', 'count'),
             success_orders_count=('status_id', lambda x: (x == success_status_id).sum()),
@@ -340,7 +336,7 @@ def execute_functions_mode(mode, granularity, order_type):
         data_invoice = data_invoice.merge(data_from_dwh,
                                           on=['date_start', 'date_end', 'currency', 'payment_system', 'bank_name',
                                               'bank_country', 'cluster', 'granularity',
-                                              'engine', 'client_name', 'device'],
+                                              'engine', 'client_name'],
                                           how='inner', suffixes=('_new', '_old'))
         data_invoice.to_csv('test_inv.csv', index=False)
         data_invoice = data_invoice[(data_invoice['amount_sum_new'] != data_invoice['amount_sum_old']) |
@@ -379,9 +375,7 @@ def execute_functions_mode(mode, granularity, order_type):
                       granularity = %s AND
                       order_type = %s AND
                       engine = %s AND
-                      client_name = %s AND
-                      device = %s
-
+                      client_name = %s 
                 """
                 avg_close_time_interval = f"{row['avg_close_time']} seconds"  # Форматируем как интервал в секундах
 
@@ -402,8 +396,7 @@ def execute_functions_mode(mode, granularity, order_type):
                     row['granularity'],
                     order_type,
                     row['engine'],
-                    row['client_name'],
-                    row['device']
+                    row['client_name']
                 ))
             conn.commit()
             conn.close()
