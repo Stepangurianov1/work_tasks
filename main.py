@@ -333,6 +333,9 @@ def execute_functions_mode(mode, granularity, order_type):
         data_from_dwh['date_start'] = pd.to_datetime(data_from_dwh['date_start'], errors='coerce')
         data_from_dwh['date_end'] = pd.to_datetime(data_from_dwh['date_end'], errors='coerce')
 
+        data_invoice = data_invoice.round(2)
+        data_from_dwh = data_from_dwh.round(2)
+
         data_invoice = data_invoice.merge(data_from_dwh,
                                           on=['date_start', 'date_end', 'currency', 'payment_system', 'bank_name',
                                               'bank_country', 'cluster', 'granularity',
@@ -377,15 +380,13 @@ def execute_functions_mode(mode, granularity, order_type):
                       engine = %s AND
                       client_name = %s 
                 """
-                avg_close_time_interval = f"{row['avg_close_time']} seconds"  # Форматируем как интервал в секундах
-
                 cursor.execute(update_query, (
                     row['amount_sum'],
                     row['success_orders_count'],
                     row['user_count'],
                     row['success_amount_sum'],
                     row['reject_amount_sum'],
-                    avg_close_time_interval,
+                    row['avg_close_time'],
                     row['date_start'],
                     row['date_end'],
                     row['currency'],
