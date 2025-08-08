@@ -69,6 +69,7 @@ def query_get_data_inplace(day_start, day_end):
     return query_get_data_invoice
 
 
+@with_retry_on_connection_error
 def create_conn_dwh():
     connection = psycopg2.connect(
         dbname='postgres',
@@ -210,7 +211,7 @@ def assign_cluster(count):
 
 def agg_data(date_start: str, date_end: str, granularity: str, order_type: str) -> pd.DataFrame:
     data = get_invoice_data_by_days(date_start, date_end, order_type)
-    data['device_short'] = data['device'].apply(lambda x: parce_device(x))
+    data['device'] = data['device'].apply(lambda x: parce_device(x))
 
     data['created_at'] = pd.to_datetime(data['created_at'])
     # TODO: Тут заглушка, пока в withdraw нет payer_id
@@ -233,7 +234,8 @@ def agg_data(date_start: str, date_end: str, granularity: str, order_type: str) 
     data['created_at'] = pd.to_datetime(data['created_at'], utc=True, errors='coerce')
     data['finished_at'] = pd.to_datetime(data['finished_at'], utc=True, errors='coerce')
 
-    data['close_diff'] = data['finished_at'] - data['created_at']
+    data['close_diff'] = (data['finished_at'] - data['created_at']).dt.total_seconds().astype(int)
+    print(data['close_diff'].iloc[0])
     if order_type == 'invoice':
         success_status_id = 2
     else:
@@ -258,7 +260,7 @@ def agg_data(date_start: str, date_end: str, granularity: str, order_type: str) 
         data_granularity
         .groupby(
             ['date_start', 'date_end', 'currency', 'payment_system', 'bank_name',
-             'bank_country', 'cluster', 'engine', 'client_name'])
+             'bank_country', 'cluster', 'engine', 'client_name', 'device'])
         .agg(
             orders_count=('order_id', 'count'),
             success_orders_count=('status_id', lambda x: (x == success_status_id).sum()),
@@ -271,9 +273,10 @@ def agg_data(date_start: str, date_end: str, granularity: str, order_type: str) 
         .reset_index()
     )
     data_granularity['granularity'] = granularity
-    data_granularity['avg_close_time'] = (data_granularity['avg_close_time']
-                                          .astype('timedelta64[s]')
-                                          .apply(lambda x: str(pd.to_timedelta(x, unit='s'))))
+
+    # data_granularity['avg_close_time'] = (data_granularity['avg_close_time']
+    #                                       .astype('timedelta64[s]')
+    #                                       .apply(lambda x: str(pd.to_timedelta(x, unit='s'))))
     data_granularity['date_start'] = data_granularity['date_start'].astype(str)
     data_granularity['date_end'] = data_granularity['date_end'].astype(str)
     return data_granularity
@@ -327,10 +330,6 @@ def execute_functions_mode(mode, granularity, order_type):
 
         print(data_from_dwh.shape)
         print(data_invoice.shape)
-        data_invoice['avg_close_time'] = pd.to_timedelta(data_invoice['avg_close_time'],
-                                                         errors='coerce').dt.total_seconds()
-        data_from_dwh['avg_close_time'] = pd.to_timedelta(data_from_dwh['avg_close_time'],
-                                                          errors='coerce').dt.total_seconds()
 
         data_invoice['date_start'] = pd.to_datetime(data_invoice['date_start'], errors='coerce')
         data_invoice['date_end'] = pd.to_datetime(data_invoice['date_end'], errors='coerce')
@@ -340,7 +339,8 @@ def execute_functions_mode(mode, granularity, order_type):
 
         data_invoice = data_invoice.merge(data_from_dwh,
                                           on=['date_start', 'date_end', 'currency', 'payment_system', 'bank_name',
-                                              'bank_country', 'cluster', 'granularity', 'engine', 'client_name'],
+                                              'bank_country', 'cluster', 'granularity',
+                                              'engine', 'client_name', 'device'],
                                           how='inner', suffixes=('_new', '_old'))
         data_invoice.to_csv('test_inv.csv', index=False)
         data_invoice = data_invoice[(data_invoice['amount_sum_new'] != data_invoice['amount_sum_old']) |
@@ -379,7 +379,8 @@ def execute_functions_mode(mode, granularity, order_type):
                       granularity = %s AND
                       order_type = %s AND
                       engine = %s AND
-                      client_name = %s
+                      client_name = %s AND
+                      device = %s
 
                 """
                 avg_close_time_interval = f"{row['avg_close_time']} seconds"  # Форматируем как интервал в секундах
@@ -401,7 +402,8 @@ def execute_functions_mode(mode, granularity, order_type):
                     row['granularity'],
                     order_type,
                     row['engine'],
-                    row['client_name']
+                    row['client_name'],
+                    row['device']
                 ))
             conn.commit()
             conn.close()
@@ -426,6 +428,8 @@ def execute_functions_mode(mode, granularity, order_type):
             date_end = end_of_previous_month.date()
         date_start = date_start.strftime('%Y-%m-%d')
         date_end = date_end.strftime('%Y-%m-%d')
+        # date_start = '2025-07-01'
+        # date_end = '2025-07-31'
         print(date_start, date_end)
         data_invoice = agg_data(date_start, date_end, granularity, order_type)
         data_invoice['order_type'] = order_type
@@ -441,18 +445,18 @@ def execute_functions_mode(mode, granularity, order_type):
 
 
 def main(granularity):
-    # execute_functions_mode(mode='upload', granularity=granularity, order_type='payout')
-    # print(f'Отработал: mode - upload, granularity - {granularity}, order_type - payout')
+    execute_functions_mode(mode='upload', granularity=granularity, order_type='payout')
+    print(f'Отработал: mode - upload, granularity - {granularity}, order_type - payout')
 
-    execute_functions_mode(mode='update', granularity=granularity, order_type='payout')
-    print(f'Отработал: mode - update, granularity - {granularity}, order_type - payout')
+    # execute_functions_mode(mode='update', granularity=granularity, order_type='payout')
+    # print(f'Отработал: mode - update, granularity - {granularity}, order_type - payout')
 
-    # execute_functions_mode(mode='upload', granularity=granularity, order_type='invoice')
-    # print(f'Отработал: mode - upload, granularity - {granularity}, order_type - invoice')
+    execute_functions_mode(mode='upload', granularity=granularity, order_type='invoice')
+    print(f'Отработал: mode - upload, granularity - {granularity}, order_type - invoice')
 
-    execute_functions_mode(mode='update', granularity=granularity, order_type='invoice')
-    print(f'Отработал: mode - update, granularity - {granularity}, order_type - invoice')
+    # execute_functions_mode(mode='update', granularity=granularity, order_type='invoice')
+    # print(f'Отработал: mode - update, granularity - {granularity}, order_type - invoice')
 
 
 if __name__ == '__main__':
-    main(granularity='D')
+    main(granularity='M')
