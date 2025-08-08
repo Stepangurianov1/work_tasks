@@ -80,6 +80,35 @@ def create_conn_dwh():
     return connection
 
 
+def convert_dtypes(df):
+    dtype_dict = {
+        'date_start': 'datetime64[ns]',
+        'date_end': 'datetime64[ns]',
+        'currency': 'object',
+        'payment_system': 'object',
+        'bank_name': 'object',
+        'bank_country': 'object',
+        'cluster': 'object',
+        'engine': 'object',
+        'client_name': 'object',
+        'orders_count': 'int64',
+        'success_orders_count': 'int64',
+        'user_count': 'int64',
+        'amount_sum': 'float64',
+        'success_amount_sum': 'float64',
+        'reject_amount_sum': 'float64',
+        'avg_close_time': 'float64',
+        'granularity': 'object'
+    }
+    for col, dtype in dtype_dict.items():
+        if col in df.columns:
+            try:
+                df[col] = df[col].astype(dtype)
+            except Exception as e:
+                print(f"Не удалось привести столбец '{col}' к типу {dtype}: {e}")
+    return df
+
+
 def run_query_dwh(query, connection):
     cursor = connection.cursor()
     cursor.execute(query)
@@ -230,8 +259,11 @@ def agg_data(date_start: str, date_end: str, granularity: str, order_type: str) 
     data['created_at'] = pd.to_datetime(data['created_at'], utc=True, errors='coerce')
     data['finished_at'] = pd.to_datetime(data['finished_at'], utc=True, errors='coerce')
 
-    data['close_diff'] = (data['finished_at'] - data['created_at']).dt.total_seconds().astype(int)
-    print(data['close_diff'].iloc[0])
+    try:
+        data['close_diff'] = (data['finished_at'] - data['created_at']).dt.total_seconds().astype(float)
+    except pd.errors.IntCastingNaNError:
+        data['close_diff'] = np.nan
+
     if order_type == 'invoice':
         success_status_id = 2
     else:
@@ -313,6 +345,8 @@ def execute_functions_mode(mode, granularity, order_type):
             date_start = date_start.strftime('%Y-%m-%d')
 
         date_end = date_end.strftime('%Y-%m-%d')
+        # date_start = '2025-07-01'
+        # date_end = '2025-07-03'
         print(date_end, date_start)
         data_invoice = agg_data(date_start, date_end, granularity, order_type)
         query_get_from_dwh = f"""SELECT * FROM cascade.e_come_payments_summary
@@ -327,14 +361,14 @@ def execute_functions_mode(mode, granularity, order_type):
         print(data_from_dwh.shape)
         print(data_invoice.shape)
 
-        data_invoice['date_start'] = pd.to_datetime(data_invoice['date_start'], errors='coerce')
-        data_invoice['date_end'] = pd.to_datetime(data_invoice['date_end'], errors='coerce')
-
-        data_from_dwh['date_start'] = pd.to_datetime(data_from_dwh['date_start'], errors='coerce')
-        data_from_dwh['date_end'] = pd.to_datetime(data_from_dwh['date_end'], errors='coerce')
+        data_invoice = convert_dtypes(data_invoice)
+        data_from_dwh = convert_dtypes(data_from_dwh)
 
         data_invoice = data_invoice.round(2)
         data_from_dwh = data_from_dwh.round(2)
+
+        print(data_invoice.dtypes)
+        print(data_from_dwh.dtypes)
 
         data_invoice = data_invoice.merge(data_from_dwh,
                                           on=['date_start', 'date_end', 'currency', 'payment_system', 'bank_name',
@@ -367,7 +401,7 @@ def execute_functions_mode(mode, granularity, order_type):
                     user_count = %s,
                     success_amount_sum = %s,
                     reject_amount_sum = %s,
-                    avg_close_time = INTERVAL %s  -- передаем интервал
+                    avg_close_time = %s  -- передаем интервал
                 WHERE date_start = %s AND
                       date_end = %s AND
                       currency = %s AND
@@ -423,11 +457,12 @@ def execute_functions_mode(mode, granularity, order_type):
         date_start = date_start.strftime('%Y-%m-%d')
         date_end = date_end.strftime('%Y-%m-%d')
         # date_start = '2025-07-01'
-        # date_end = '2025-07-31'
+        # date_end = '2025-07-03'
         print(date_start, date_end)
         data_invoice = agg_data(date_start, date_end, granularity, order_type)
         data_invoice['order_type'] = order_type
     if not data_invoice.empty:
+        data_invoice = data_invoice.round(2)
         data_invoice.to_sql(
             schema='cascade',
             name='e_come_payments_summary',
@@ -439,17 +474,17 @@ def execute_functions_mode(mode, granularity, order_type):
 
 
 def main(granularity):
-    execute_functions_mode(mode='upload', granularity=granularity, order_type='payout')
-    print(f'Отработал: mode - upload, granularity - {granularity}, order_type - payout')
-
+    # execute_functions_mode(mode='upload', granularity=granularity, order_type='payout')
+    # print(f'Отработал: mode - upload, granularity - {granularity}, order_type - payout')
+    #
     # execute_functions_mode(mode='update', granularity=granularity, order_type='payout')
     # print(f'Отработал: mode - update, granularity - {granularity}, order_type - payout')
 
-    execute_functions_mode(mode='upload', granularity=granularity, order_type='invoice')
-    print(f'Отработал: mode - upload, granularity - {granularity}, order_type - invoice')
+    # execute_functions_mode(mode='upload', granularity=granularity, order_type='invoice')
+    # print(f'Отработал: mode - upload, granularity - {granularity}, order_type - invoice')
 
-    # execute_functions_mode(mode='update', granularity=granularity, order_type='invoice')
-    # print(f'Отработал: mode - update, granularity - {granularity}, order_type - invoice')
+    execute_functions_mode(mode='update', granularity=granularity, order_type='invoice')
+    print(f'Отработал: mode - update, granularity - {granularity}, order_type - invoice')
 
 
 if __name__ == '__main__':
