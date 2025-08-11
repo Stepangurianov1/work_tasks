@@ -119,19 +119,11 @@ def query_get_data_payout(day_start, day_end, clients_ids: tuple):
             i.created_at,
             i.client_id,
             i.status_id,
-            i.engine_id,
             i.finished_at,
-            lc.name as client_name,
             lcl.system_name as currency,
-            e.display_name,
-            i.extra -> 'binInfo' -> 'bankName' as bank_name,
-            i.extra -> 'binInfo' -> 'paymentSystem' as payment_system,
-            i.extra -> 'binInfo' -> 'country' as bank_country
+            extra -> 'cardDetails' ->> 'pan' AS pan
         FROM orders.withdraw_engine i
-            JOIN clients.client lc on lc.id = i.client_id
             JOIN lists.currency_list lcl on lcl.id = i.currency_id
-            JOIN engines.engine e on e.id = i.engine_id
-            join orders.withdraw ow on ow.id = i.order_id
         WHERE i.created_at >= '{day_start}' and i.created_at <= '{day_end}' and i.client_id in {clients_ids}
     """
     return query
@@ -418,8 +410,8 @@ def execute_functions_mode(mode, order_type):
 
 
 def main(granularity):
-    # execute_functions_mode(mode='upload', order_type='payout')
-    # print(f'Отработал: mode - upload, granularity - {granularity}, order_type - payout')
+    execute_functions_mode(mode='upload', order_type='payout')
+    print(f'Отработал: mode - upload, granularity - {granularity}, order_type - payout')
     #
     # execute_functions_mode(mode='update', granularity=granularity, order_type='payout')
     # print(f'Отработал: mode - update, granularity - {granularity}, order_type - payout')
