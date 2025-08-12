@@ -103,7 +103,7 @@ def run_query_dwh(query, connection):
 
 def query_get_data_payout(day_start, day_end, clients_ids: tuple):
     query = f"""
-            SELECT
+        SELECT
             i.id,
             i.order_id,
             i.amount,
@@ -112,9 +112,10 @@ def query_get_data_payout(day_start, day_end, clients_ids: tuple):
             i.status_id,
             i.finished_at,
             lcl.system_name as currency,
-            extra -> 'cardDetails' ->> 'pan' AS pan
+            w.recipient AS pan
         FROM orders.withdraw_engine i
             JOIN lists.currency_list lcl on lcl.id = i.currency_id
+            left join orders.withdraw w on w.id = i.order_id 
         WHERE i.created_at >= '{day_start}' and i.created_at <= '{day_end}' and i.client_id in {clients_ids}
     """
     return query
@@ -344,9 +345,12 @@ def execute_functions_mode(mode, order_type):
         with conn.cursor() as cur:
             delete_query = """
                         DELETE FROM cascade.cards_info_sg
-                        WHERE "date" >= %s AND "date" <= %s
+                        WHERE "date" >= %s AND
+                              "date" <= %s AND
+                              "order_type" = %s 
+                        
                     """
-            cur.execute(delete_query, (date_start, date_end))
+            cur.execute(delete_query, (date_start, date_end, order_type))
         conn.commit()
 
         data_invoice.to_sql(
@@ -363,14 +367,14 @@ def main():
     execute_functions_mode(mode='upload', order_type='payout')
     print('Отработал: mode - upload, order_type - payout')
 
-    # execute_functions_mode(mode='update', order_type='payout')
-    # print('Отработал: mode - update, order_type - payout')
+    execute_functions_mode(mode='update', order_type='payout')
+    print('Отработал: mode - update, order_type - payout')
     #
-    # execute_functions_mode(mode='upload', order_type='invoice')
-    # print('Отработал: mode - upload, order_type - invoice')
-    #
-    # execute_functions_mode(mode='update', order_type='invoice')
-    # print('Отработал: mode - update, order_type - invoice')
+    execute_functions_mode(mode='upload', order_type='invoice')
+    print('Отработал: mode - upload, order_type - invoice')
+
+    execute_functions_mode(mode='update', order_type='invoice')
+    print('Отработал: mode - update, order_type - invoice')
 
 
 if __name__ == '__main__':
