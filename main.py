@@ -330,7 +330,9 @@ def execute_functions_mode(mode, granularity, order_type):
         conn = create_conn_dwh()
         date_end = \
             run_query_dwh(f"""SELECT max(date_end) as max_date FROM cascade.e_come_payments_summary
-                                     WHERE granularity = '{granularity}'""", conn)['max_date'].iloc[0]
+                                     WHERE granularity = '{granularity}' AND 
+                                     order_type = '{order_type}' 
+                                    """, conn)['max_date'].iloc[0]
 
         date_start = (date_end - relativedelta(months=1)).strftime('%Y-%m-%d')
         if granularity == 'M':
@@ -351,7 +353,7 @@ def execute_functions_mode(mode, granularity, order_type):
         data_invoice = agg_data(date_start, date_end, granularity, order_type)
         query_get_from_dwh = f"""SELECT * FROM cascade.e_come_payments_summary
                                  WHERE "date_start" >= '{date_start}' AND "date_end" <= '{date_end}'
-                                 AND granularity = '{granularity}'
+                                 AND granularity = '{granularity}' AND order_type = '{order_type}'
                              """
         print(query_get_from_dwh)
 
@@ -487,17 +489,19 @@ def execute_functions_mode(mode, granularity, order_type):
 
 
 def main(granularity):
-    execute_functions_mode(mode='upload', granularity=granularity, order_type='payout')
-    print(f'Отработал: mode - upload, granularity - {granularity}, order_type - payout')
-    #
     # execute_functions_mode(mode='update', granularity=granularity, order_type='payout')
     # print(f'Отработал: mode - update, granularity - {granularity}, order_type - payout')
 
-    # execute_functions_mode(mode='upload', granularity=granularity, order_type='invoice')
-    # print(f'Отработал: mode - upload, granularity - {granularity}, order_type - invoice')
+    execute_functions_mode(mode='upload', granularity=granularity, order_type='payout')
+    print(f'Отработал: mode - upload, granularity - {granularity}, order_type - payout')
+    #
 
     # execute_functions_mode(mode='update', granularity=granularity, order_type='invoice')
     # print(f'Отработал: mode - update, granularity - {granularity}, order_type - invoice')
+
+
+    # execute_functions_mode(mode='upload', granularity=granularity, order_type='invoice')
+    # print(f'Отработал: mode - upload, granularity - {granularity}, order_type - invoice')
 
 
 if __name__ == '__main__':

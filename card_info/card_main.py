@@ -162,7 +162,7 @@ def get_invoice_data_by_days(start_date: str, end_date: str, type_order: str):
             day_end = current_date.strftime('%Y-%m-%d 23:59:59')
             print(f"День {day_counter}: {current_date.strftime('%Y-%m-%d')}")
             print(type_order)
-            if type_order == 'invoice':
+            if type_order == 'payin':
                 query_get_data = query_get_data_inplace(day_start, day_end)
             else:
                 query_get_data = query_get_data_payout(day_start, day_end, clients_ids=tuple([3960, 3949]))
@@ -200,7 +200,7 @@ def agg_data(date_start: str, date_end: str, order_type: str) -> pd.DataFrame:
     except pd.errors.IntCastingNaNError:
         data['close_diff'] = np.nan
 
-    if order_type == 'invoice':
+    if order_type == 'payin':
         success_status_id = 2
     else:
         success_status_id = 4
@@ -215,7 +215,6 @@ def agg_data(date_start: str, date_end: str, order_type: str) -> pd.DataFrame:
     data_group['date'] = data_group['created_at'].dt.to_period('D')
     print(data_group)
     print(data_group.columns)
-    data_group.to_csv('data_group.csv', index=False)
     data_group = (
         data_group
         .groupby(
@@ -254,14 +253,17 @@ def execute_functions_mode(mode, order_type):
     if mode == 'update':
         conn = create_conn_dwh()
         date_end = \
-            run_query_dwh(f"""SELECT max("date") as max_date FROM cascade.cards_info_sg""", conn)['max_date'].iloc[0]
+            run_query_dwh(f"""SELECT max("date") as max_date FROM cascade.cards_info_sg
+                                    WHERE order_type = '{order_type}'
+                                    """, conn)['max_date'].iloc[0]
 
         date_start = (date_end - relativedelta(months=1)).strftime('%Y-%m-%d')
         date_end = date_end.strftime('%Y-%m-%d')
         print(date_end, date_start)
         data_invoice = agg_data(date_start, date_end, order_type)
         query_get_from_dwh = f"""SELECT * FROM cascade.cards_info_sg
-                                 WHERE "date" >= '{date_start}' AND "date" <= '{date_end}'
+                                 WHERE "date" >= '{date_start}' AND "date" <= '{date_end}' AND
+                                 order_type = '{order_type}'
                              """
         conn = create_conn_dwh()
         data_from_dwh = run_query_dwh(query_get_from_dwh, conn)
@@ -274,7 +276,6 @@ def execute_functions_mode(mode, order_type):
 
         data_invoice = data_invoice.round(2)
         data_from_dwh = data_from_dwh.round(2)
-
         data_invoice = data_invoice.merge(data_from_dwh,
                                           on=['date', 'pan', 'currency'],
                                           how='inner', suffixes=('_new', '_old'))
@@ -286,13 +287,13 @@ def execute_functions_mode(mode, order_type):
                                     (data_invoice['reject_amount_sum_new'] != data_invoice['reject_amount_sum_old']) |
                                     (data_invoice['avg_close_time_new'] != data_invoice['avg_close_time_old'])
                                     ]
-
         data_invoice = data_invoice.drop(columns=[col for col in data_invoice.columns if col.endswith('_old')])
         data_invoice = data_invoice.rename(
             columns={col: col.replace('_new', '') for col in data_invoice.columns if col.endswith('_new')})
 
         conn.close()
         conn = create_conn_dwh()
+        print('nen')
         print(data_invoice)
         with conn.cursor() as cursor:
             for index, row in data_invoice.iterrows():
@@ -330,8 +331,6 @@ def execute_functions_mode(mode, order_type):
 
         date_start = date_start.strftime('%Y-%m-%d')
         date_end = date_end.strftime('%Y-%m-%d')
-        date_start = '2025-08-10'
-        date_end = '2025-08-11'
         print(date_start, date_end)
         data_invoice = agg_data(date_start, date_end, order_type)
         data_invoice['order_type'] = order_type
@@ -364,17 +363,17 @@ def execute_functions_mode(mode, order_type):
 
 
 def main():
+    execute_functions_mode(mode='update', order_type='payout')
+    print('Отработал: mode - update, order_type - payout')
+
     execute_functions_mode(mode='upload', order_type='payout')
     print('Отработал: mode - upload, order_type - payout')
 
-    execute_functions_mode(mode='update', order_type='payout')
-    print('Отработал: mode - update, order_type - payout')
-    #
-    execute_functions_mode(mode='upload', order_type='invoice')
-    print('Отработал: mode - upload, order_type - invoice')
+    execute_functions_mode(mode='update', order_type='payin')
+    print('Отработал: mode - update, order_type - payin')
 
-    execute_functions_mode(mode='update', order_type='invoice')
-    print('Отработал: mode - update, order_type - invoice')
+    execute_functions_mode(mode='upload', order_type='payin')
+    print('Отработал: mode - upload, order_type - payin')
 
 
 if __name__ == '__main__':
