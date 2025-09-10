@@ -60,9 +60,9 @@ def query_get_data_inplace(day_start, day_end):
                 extra -> 'binInfo' -> 'country' as bank_country
             FROM orders.invoice i
                 JOIN lists.invoice_order_type_list iotl ON i.order_type_id = iotl.id
-                JOIN clients.client lc on lc.id = i.client_id
-                JOIN lists.currency_list lcl on lcl.id = i.currency_id
-                JOIN engines.engine e on e.id = i.engine_id
+                LEFT JOIN clients.client lc on lc.id = i.client_id
+                LEFT JOIN lists.currency_list lcl on lcl.id = i.currency_id
+                LEFT JOIN engines.engine e on e.id = i.engine_id
             WHERE i.created_at >= '{day_start}' AND i.created_at < '{day_end}'
               AND iotl.system_name ILIKE '%H2H%'
             """
@@ -76,7 +76,8 @@ def create_conn_dwh():
         user='ste',
         password='ILzAYQ72aEe9',
         host='primarydwhcsd.aerxd.tech',
-        port=6432
+        port=6432,
+        options='-c timezone=Europe/Moscow'
     )
     return connection
 
@@ -137,11 +138,11 @@ def query_get_data_payout(day_start, day_end, clients_ids: tuple):
             i.extra -> 'binInfo' -> 'paymentSystem' as payment_system,
             i.extra -> 'binInfo' -> 'country' as bank_country
         FROM orders.withdraw_engine i
-            JOIN clients.client lc on lc.id = i.client_id
-            JOIN lists.currency_list lcl on lcl.id = i.currency_id
-            JOIN engines.engine e on e.id = i.engine_id
-            join orders.withdraw ow on ow.id = i.order_id
-        WHERE i.created_at >= '{day_start}' and i.created_at <= '{day_end}' and i.client_id in {clients_ids}
+            LEFT JOIN clients.client lc on lc.id = i.client_id
+            LEFT JOIN lists.currency_list lcl on lcl.id = i.currency_id
+            LEFT JOIN engines.engine e on e.id = i.engine_id
+            LEFT JOIN orders.withdraw ow on ow.id = i.order_id
+        WHERE i.created_at >= '{day_start}' and i.created_at < '{day_end}' and i.client_id in {clients_ids}
     """
     return query
 
@@ -153,7 +154,8 @@ def create_connection():
         user='datalens_utl',
         password='mQnXQaHP6zkOaFdTLRVLx40gT4',
         host='138.68.88.175',
-        port=5432
+        port=5432,
+        options='-c timezone=Europe/Moscow'
     )
 
 
@@ -166,11 +168,39 @@ def run_query_with_conn(conn, query):
     return df
 
 
+def run_query_with_params(conn, query, params):
+    with conn.cursor() as cursor:
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        columns = [desc[0] for desc in cursor.description]
+        df = pd.DataFrame(rows, columns=columns)
+    return df
+
+
+def normalize_bounds_for_delete(date_start: str, date_end: str, granularity: str) -> tuple[str, str]:
+    """Возвращает (start_incl, end_excl) для безопасного удаления, без несуществующих дат.
+    - D: [date_start, date_start+1d)
+    - W: [начало недели, начало недели+7d)
+    - M: [первый день месяца, первый день следующего месяца)
+    """
+    start_dt = pd.to_datetime(date_start, errors='coerce')
+    end_dt = pd.to_datetime(date_end, errors='coerce')
+    if granularity == 'M':
+        start_dt = start_dt.replace(day=1)
+        end_excl = (start_dt + MonthEnd(0) + pd.Timedelta(days=1))
+    elif granularity == 'W':
+        start_dt = (start_dt.normalize() - pd.to_timedelta(start_dt.normalize().weekday(), unit='D'))
+        end_excl = start_dt + pd.Timedelta(days=7)
+    else:
+        start_dt = start_dt.normalize()
+        end_excl = start_dt + pd.Timedelta(days=1)
+    return start_dt.strftime('%Y-%m-%d'), end_excl.strftime('%Y-%m-%d')
+
+
 def get_invoice_data_by_days(start_date: str, end_date: str, type_order: str):
-    MOSCOW_TZ = pytz.timezone("Europe/Moscow")
     try:
-        start = safe_parse_date(start_date).replace(tzinfo=MOSCOW_TZ)  # фиксируем Мск
-        end = safe_parse_date(end_date).replace(tzinfo=MOSCOW_TZ)
+        start = safe_parse_date(start_date)
+        end = safe_parse_date(end_date)
     except Exception as e:
         print(e)
         return pd.DataFrame()
@@ -184,8 +214,8 @@ def get_invoice_data_by_days(start_date: str, end_date: str, type_order: str):
 
     try:
         while current_date <= end:
-            day_start = current_date.strftime('%Y-%m-%d 00:00:00+03')
-            day_end = (current_date + timedelta(days=1)).strftime('%Y-%m-%d 00:00:00+03')
+            day_start = current_date.strftime('%Y-%m-%d 00:00:00')
+            day_end = (current_date + timedelta(days=1)).strftime('%Y-%m-%d 00:00:00')
 
             print(f"День {day_counter}: {current_date.strftime('%Y-%m-%d')}")
 
@@ -196,6 +226,13 @@ def get_invoice_data_by_days(start_date: str, end_date: str, type_order: str):
 
             try:
                 daily_data = run_query_with_conn(conn, query_get_data)
+
+                daily_data['created_at'] = pd.to_datetime(daily_data['created_at'])
+                daily_data['created_at'] = daily_data['created_at'].dt.tz_localize(None)
+
+                daily_data['finished_at'] = pd.to_datetime(daily_data['finished_at'])
+                daily_data['finished_at'] = daily_data['finished_at'].dt.tz_localize(None)
+
                 if not daily_data.empty:
                     daily_data['processing_date'] = current_date.strftime('%Y-%m-%d')
                     final_df = pd.concat([final_df, daily_data], ignore_index=True)
@@ -211,7 +248,6 @@ def get_invoice_data_by_days(start_date: str, end_date: str, type_order: str):
             time.sleep(0.5)
     finally:
         conn.close()
-
     final_df.to_csv('test.csv', index=False)
     final_df = final_df.rename(columns={'display_name': 'engine'})
     return final_df
@@ -233,17 +269,34 @@ def assign_cluster(count):
 
 def agg_data(date_start: str, date_end: str, granularity: str, order_type: str) -> pd.DataFrame:
     data = get_invoice_data_by_days(date_start, date_end, order_type)
-    data['created_at'] = pd.to_datetime(data['created_at'])
     data.to_csv('test.csv', index=False)
     # TODO: Тут заглушка, пока в withdraw нет payer_id
     if order_type == 'invoice':
         conn = create_connection()
-        query_get_orders_count = f"""
-                    select COUNT(id) as orders_count, payer_id from orders.invoice i 
-                    where created_at > '01-04-2025' and payer_id in {tuple(data['payer_id'].unique())}
-                    group by payer_id
-                """
-        df_get_orders_count = run_query_with_conn(conn, query_get_orders_count)
+        payer_ids = [str(x) for x in pd.Series(data['payer_id']).dropna().astype(str).unique().tolist()]
+        if len(payer_ids) == 0:
+            df_get_orders_count = pd.DataFrame({
+                'payer_id': pd.Series(dtype='int64'),
+                'orders_count': pd.Series(dtype='int64')
+            })
+        else:
+            # Считаем заказы с 2025-04-01 для нужных payer_id через параметризованный ANY, чанкованием
+            df_list = []
+            query_get_orders_count = (
+                "select payer_id, COUNT(id) as orders_count "
+                "from orders.invoice "
+                "where created_at >= %s and payer_id::text = ANY(%s) "
+                "group by payer_id"
+            )
+            start_bound = datetime(2025, 4, 1)
+            chunk_size = 10000
+            for i in range(0, len(payer_ids), chunk_size):
+                chunk = payer_ids[i:i + chunk_size]
+                df_part = run_query_with_params(conn, query_get_orders_count, (start_bound, chunk))
+                df_list.append(df_part)
+            df_get_orders_count = pd.concat(df_list, ignore_index=True) if df_list else pd.DataFrame(columns=['payer_id', 'orders_count'])
+            if not df_get_orders_count.empty:
+                df_get_orders_count = df_get_orders_count.groupby('payer_id', as_index=False)['orders_count'].sum()
         conn.close()
         data = data.merge(df_get_orders_count, on='payer_id', how='left')
         print(data['orders_count'].isna().sum())
@@ -251,9 +304,8 @@ def agg_data(date_start: str, date_end: str, granularity: str, order_type: str) 
     else:
         data['cluster'] = '-'
         data['payer_id'] = np.nan
-    # в блоке "W"
-    data['created_at'] = pd.to_datetime(data['created_at'], utc=True, errors='coerce')
-    data['finished_at'] = pd.to_datetime(data['finished_at'], utc=True, errors='coerce')
+    data['created_at'] = pd.to_datetime(data['created_at'], errors='coerce')
+    data['finished_at'] = pd.to_datetime(data['finished_at'], errors='coerce')
 
     try:
         data['close_diff'] = (data['finished_at'] - data['created_at']).dt.total_seconds().astype(float)
@@ -267,24 +319,37 @@ def agg_data(date_start: str, date_end: str, granularity: str, order_type: str) 
     data['success_amount'] = data['amount'].where(data['status_id'] == success_status_id, 0)
     data['reject_amount'] = data['amount'].where(data['status_id'] != success_status_id, 0)
     data_granularity = data.copy()
-    data_granularity['created_at'] = data_granularity['created_at'].dt.tz_convert("Europe/Moscow")
-    for col in data_granularity.select_dtypes(include=['datetimetz']).columns:
-        data_granularity[col] = data_granularity[col].dt.tz_localize(None)
+    # Единая логика дат для всех гранулярностей (без Period в результирующих ключах)
     if granularity == 'M':
-        data_granularity['date_start'] = data_granularity['created_at'].dt.to_period('M').dt.to_timestamp()
-        data_granularity['date_end'] = (data_granularity['date_start'] + MonthEnd(0)).dt.date
-        data_granularity['date_start'] = data_granularity['date_start'].dt.date
+        base = data_granularity['created_at'].dt.normalize()
+        # Первый день месяца как Series: откат на (day-1) дней
+        m_start = base - pd.to_timedelta(base.dt.day - 1, unit='D')
+        data_granularity['date_start'] = m_start.dt.date
+        data_granularity['date_end'] = (m_start + MonthEnd(0)).dt.date
     elif granularity == 'W':
-        data_granularity['date_start'] = data_granularity['created_at'].dt.to_period('W').apply(lambda x: x.start_time)
-        data_granularity['date_end'] = (data_granularity['date_start'] + pd.Timedelta(days=6)).dt.date
+        base = data_granularity['created_at'].dt.normalize()
+        week_start = (base - pd.to_timedelta(base.dt.weekday, unit='D'))
+        data_granularity['date_start'] = week_start.dt.date
+        data_granularity['date_end'] = (week_start + pd.Timedelta(days=6)).dt.date
+    elif granularity == 'D':
+        day = data_granularity['created_at'].dt.floor('D').dt.date
+        data_granularity['date_start'] = day
+        data_granularity['date_end'] = day
     else:
-        data_granularity['date_start'] = data_granularity['created_at'].dt.to_period(granularity)
-        data_granularity['date_end'] = data_granularity['created_at'].dt.to_period(granularity)
+        # Фоллбек: как день
+        day = data_granularity['created_at'].dt.floor('D').dt.date
+        data_granularity['date_start'] = day
+        data_granularity['date_end'] = day
+
+    # Заполняем пропуски измерений, чтобы не терять строки в groupby
+    dims = ['currency', 'payment_system', 'bank_name', 'bank_country', 'cluster', 'engine', 'client_name']
+    for c in dims:
+        if c in data_granularity.columns:
+            data_granularity[c] = data_granularity[c].fillna('-')
+
     data_granularity = (
         data_granularity
-        .groupby(
-            ['date_start', 'date_end', 'currency', 'payment_system', 'bank_name',
-             'bank_country', 'cluster', 'engine', 'client_name'])
+        .groupby(['date_start', 'date_end'] + dims, dropna=False)
         .agg(
             orders_count=('order_id', 'count'),
             success_orders_count=('status_id', lambda x: (x == success_status_id).sum()),
@@ -298,10 +363,6 @@ def agg_data(date_start: str, date_end: str, granularity: str, order_type: str) 
     )
     print(data_granularity['currency'].unique())
     data_granularity['granularity'] = granularity
-
-    # data_granularity['avg_close_time'] = (data_granularity['avg_close_time']
-    #                                       .astype('timedelta64[s]')
-    #                                       .apply(lambda x: str(pd.to_timedelta(x, unit='s'))))
     data_granularity['date_start'] = data_granularity['date_start'].astype(str)
     data_granularity['date_end'] = data_granularity['date_end'].astype(str)
     data_granularity.to_csv('data_granularity.csv', index=False)
@@ -456,8 +517,8 @@ def execute_functions_mode(mode, granularity, order_type):
             date_end = end_of_previous_month.date()
         date_start = date_start.strftime('%Y-%m-%d')
         date_end = date_end.strftime('%Y-%m-%d')
-        date_start = '2025-09-01'
-        date_end = '2025-09-07'
+        date_start = '2025-08-01'
+        date_end = '2025-08-31'
         print(date_start, date_end)
         data_invoice = agg_data(date_start, date_end, granularity, order_type)
         data_invoice['order_type'] = order_type
@@ -465,15 +526,16 @@ def execute_functions_mode(mode, granularity, order_type):
         data_invoice = data_invoice.round(2)
 
         conn = create_conn_dwh()
+        start_incl, end_excl = normalize_bounds_for_delete(date_start, date_end, granularity)
         with conn.cursor() as cur:
             delete_query = """
                         DELETE FROM cascade.e_come_payments_summary
                         WHERE date_start >= %s
-                          AND date_end <= %s
+                          AND date_end <  %s
                           AND granularity = %s
                           AND order_type = %s
                     """
-            cur.execute(delete_query, (date_start, date_end, granularity, order_type))
+            cur.execute(delete_query, (start_incl, end_excl, granularity, order_type))
         conn.commit()
 
         data_invoice.to_sql(
@@ -492,14 +554,16 @@ def main(granularity):
 
     execute_functions_mode(mode='upload', granularity=granularity, order_type='invoice')
     print(f'Отработал: mode - upload, granularity - {granularity}, order_type - invoice')
-    #
+
 
     # execute_functions_mode(mode='update', granularity=granularity, order_type='invoice')
     # print(f'Отработал: mode - update, granularity - {granularity}, order_type - invoice')
 
-    # execute_functions_mode(mode='upload', granularity=granularity, order_type='invoice')
-    # print(f'Отработал: mode - upload, granularity - {granularity}, order_type - invoice')
+    execute_functions_mode(mode='upload', granularity=granularity, order_type='payout')
+    print(f'Отработал: mode - upload, granularity - {granularity}, order_type - payout')
 
 
 if __name__ == '__main__':
-    main(granularity='W')
+    # main(granularity='W')
+    main(granularity='D')
+    main(granularity='M')
