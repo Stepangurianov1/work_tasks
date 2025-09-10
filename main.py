@@ -1,6 +1,7 @@
 import pandas as pd
 from typing import Callable, Any
 import psycopg2
+import pytz
 from dateutil.relativedelta import relativedelta
 from datetime import datetime, timedelta
 import time
@@ -62,7 +63,7 @@ def query_get_data_inplace(day_start, day_end):
                 JOIN clients.client lc on lc.id = i.client_id
                 JOIN lists.currency_list lcl on lcl.id = i.currency_id
                 JOIN engines.engine e on e.id = i.engine_id
-            WHERE i.created_at >= '{day_start}' AND i.created_at <= '{day_end}'
+            WHERE i.created_at >= '{day_start}' AND i.created_at < '{day_end}'
               AND iotl.system_name ILIKE '%H2H%'
             """
     return query_get_data_invoice
@@ -166,9 +167,10 @@ def run_query_with_conn(conn, query):
 
 
 def get_invoice_data_by_days(start_date: str, end_date: str, type_order: str):
+    MOSCOW_TZ = pytz.timezone("Europe/Moscow")
     try:
-        start = safe_parse_date(start_date)
-        end = safe_parse_date(end_date)
+        start = safe_parse_date(start_date).replace(tzinfo=MOSCOW_TZ)  # фиксируем Мск
+        end = safe_parse_date(end_date).replace(tzinfo=MOSCOW_TZ)
     except Exception as e:
         print(e)
         return pd.DataFrame()
@@ -182,13 +184,16 @@ def get_invoice_data_by_days(start_date: str, end_date: str, type_order: str):
 
     try:
         while current_date <= end:
-            day_start = current_date.strftime('%Y-%m-%d 00:00:00')
-            day_end = current_date.strftime('%Y-%m-%d 23:59:59')
+            day_start = current_date.strftime('%Y-%m-%d 00:00:00+03')
+            day_end = (current_date + timedelta(days=1)).strftime('%Y-%m-%d 00:00:00+03')
+
             print(f"День {day_counter}: {current_date.strftime('%Y-%m-%d')}")
+
             if type_order == 'invoice':
                 query_get_data = query_get_data_inplace(day_start, day_end)
             else:
                 query_get_data = query_get_data_payout(day_start, day_end, clients_ids=tuple([3960, 3949]))
+
             try:
                 daily_data = run_query_with_conn(conn, query_get_data)
                 if not daily_data.empty:
@@ -205,21 +210,11 @@ def get_invoice_data_by_days(start_date: str, end_date: str, type_order: str):
             day_counter += 1
             time.sleep(0.5)
     finally:
-        conn.close()  # Закрываем соединение в конце
+        conn.close()
+
     final_df.to_csv('test.csv', index=False)
     final_df = final_df.rename(columns={'display_name': 'engine'})
     return final_df
-
-
-# def parce_device(user_agent):
-#     if not isinstance(user_agent, str):
-#         return 'Unknown'
-#     match = re.search(r'\(([^;]+)', user_agent)
-#     if match:
-#         first_part = match.group(1).strip()
-#         first_word = first_part.split()[0]
-#         return first_word
-#     return 'Unknown'
 
 
 def assign_cluster(count):
@@ -239,6 +234,7 @@ def assign_cluster(count):
 def agg_data(date_start: str, date_end: str, granularity: str, order_type: str) -> pd.DataFrame:
     data = get_invoice_data_by_days(date_start, date_end, order_type)
     data['created_at'] = pd.to_datetime(data['created_at'])
+    data.to_csv('test.csv', index=False)
     # TODO: Тут заглушка, пока в withdraw нет payer_id
     if order_type == 'invoice':
         conn = create_connection()
@@ -255,7 +251,7 @@ def agg_data(date_start: str, date_end: str, granularity: str, order_type: str) 
     else:
         data['cluster'] = '-'
         data['payer_id'] = np.nan
-
+    # в блоке "W"
     data['created_at'] = pd.to_datetime(data['created_at'], utc=True, errors='coerce')
     data['finished_at'] = pd.to_datetime(data['finished_at'], utc=True, errors='coerce')
 
@@ -271,7 +267,7 @@ def agg_data(date_start: str, date_end: str, granularity: str, order_type: str) 
     data['success_amount'] = data['amount'].where(data['status_id'] == success_status_id, 0)
     data['reject_amount'] = data['amount'].where(data['status_id'] != success_status_id, 0)
     data_granularity = data.copy()
-
+    data_granularity['created_at'] = data_granularity['created_at'].dt.tz_convert("Europe/Moscow")
     for col in data_granularity.select_dtypes(include=['datetimetz']).columns:
         data_granularity[col] = data_granularity[col].dt.tz_localize(None)
     if granularity == 'M':
@@ -300,6 +296,7 @@ def agg_data(date_start: str, date_end: str, granularity: str, order_type: str) 
         )
         .reset_index()
     )
+    print(data_granularity['currency'].unique())
     data_granularity['granularity'] = granularity
 
     # data_granularity['avg_close_time'] = (data_granularity['avg_close_time']
@@ -307,6 +304,7 @@ def agg_data(date_start: str, date_end: str, granularity: str, order_type: str) 
     #                                       .apply(lambda x: str(pd.to_timedelta(x, unit='s'))))
     data_granularity['date_start'] = data_granularity['date_start'].astype(str)
     data_granularity['date_end'] = data_granularity['date_end'].astype(str)
+    data_granularity.to_csv('data_granularity.csv', index=False)
     return data_granularity
 
 
@@ -458,8 +456,8 @@ def execute_functions_mode(mode, granularity, order_type):
             date_end = end_of_previous_month.date()
         date_start = date_start.strftime('%Y-%m-%d')
         date_end = date_end.strftime('%Y-%m-%d')
-        date_start = '2025-08-04'
-        date_end = '2025-08-10'
+        date_start = '2025-09-01'
+        date_end = '2025-09-07'
         print(date_start, date_end)
         data_invoice = agg_data(date_start, date_end, granularity, order_type)
         data_invoice['order_type'] = order_type
@@ -492,13 +490,12 @@ def main(granularity):
     # execute_functions_mode(mode='update', granularity=granularity, order_type='payout')
     # print(f'Отработал: mode - update, granularity - {granularity}, order_type - payout')
 
-    execute_functions_mode(mode='upload', granularity=granularity, order_type='payout')
-    print(f'Отработал: mode - upload, granularity - {granularity}, order_type - payout')
+    execute_functions_mode(mode='upload', granularity=granularity, order_type='invoice')
+    print(f'Отработал: mode - upload, granularity - {granularity}, order_type - invoice')
     #
 
     # execute_functions_mode(mode='update', granularity=granularity, order_type='invoice')
     # print(f'Отработал: mode - update, granularity - {granularity}, order_type - invoice')
-
 
     # execute_functions_mode(mode='upload', granularity=granularity, order_type='invoice')
     # print(f'Отработал: mode - upload, granularity - {granularity}, order_type - invoice')
